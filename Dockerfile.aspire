@@ -1,0 +1,41 @@
+# Dockerfile for Aspire deployment.
+# Builds the Excalidraw app static files and serves them via YARP,
+# which also reverse proxies /socket.io traffic to the room server.
+
+FROM node:24-alpine AS build
+
+WORKDIR /app
+
+# Copy package files first for better layer caching
+COPY package.json yarn.lock ./
+COPY excalidraw-app/package.json excalidraw-app/
+COPY packages/common/package.json packages/common/
+COPY packages/element/package.json packages/element/
+COPY packages/excalidraw/package.json packages/excalidraw/
+COPY packages/math/package.json packages/math/
+COPY packages/utils/package.json packages/utils/
+
+# Install dependencies (ignore engines for compatibility)
+RUN --mount=type=cache,target=/root/.cache/yarn \
+    yarn install --frozen-lockfile --ignore-engines --network-timeout 600000
+
+# Copy source files
+COPY . .
+
+# Build the app
+ARG NODE_ENV=production
+RUN VITE_APP_WS_SERVER_URL="" yarn build:app
+
+# Final stage: YARP reverse proxy serving static files + proxying to room
+FROM mcr.microsoft.com/dotnet/nightly/yarp:2.3-preview
+
+WORKDIR /app
+
+# Copy static build output to wwwroot for YARP to serve
+COPY --from=build /app/excalidraw-app/build /app/wwwroot
+
+# Enable static file serving and configure reverse proxy via env vars.
+# Route and cluster config is injected by Aspire via environment variables:
+#   REVERSEPROXY__ROUTES__*, REVERSEPROXY__CLUSTERS__*, services__room__*
+ENV YARP_ENABLE_STATIC_FILES=true
+ENTRYPOINT ["dotnet", "/app/yarp.dll"]
